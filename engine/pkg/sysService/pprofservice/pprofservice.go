@@ -4,6 +4,7 @@
 package pprofservice
 
 import (
+	"errors"
 	"net/http"
 	_ "net/http/pprof"
 
@@ -39,30 +40,24 @@ type PprofService struct {
 	httpModule *httpmodule.HttpModule
 }
 
-func (ps *PprofService) getConf() *config.PprofConf {
-	return ps.GetServiceCfg().(*config.PprofConf)
-}
-
 func (ps *PprofService) OnInit() error {
+	conf, ok := ps.GetServiceCfg().(*config.PprofConf)
+	if !ok || conf == nil || conf.PprofConf == nil || conf.PprofConf.Addr == "" {
+		return errors.New("PprofService requires PprofConf.Addr")
+	}
 	status := systemConfig.Release
 	if ctx := ps.GetNodeContext(); ctx != nil {
 		if cfg := ctx.GetConfig(); cfg != nil {
 			status = cfg.GetStatus()
 		}
 	}
-	ps.httpModule = httpmodule.NewHttpModule(ps.getConf().PprofConf, status)
-	ps.httpModule.SetRouter(ps.initRouter())
-	_, err := ps.AddModule(ps.httpModule)
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-func (ps *PprofService) initRouter() *router_center.GroupHandlerPool {
+	// 构造 Gin 引擎前设置模式，避免 release 模式的 worker 向 stdout 写调试提示。
+	gin.SetMode(status)
 	router := router_center.NewGroupHandlerPool()
 	router.RegisterGroupHandler("", ps.routerHandler)
-	return router
+	ps.httpModule = httpmodule.NewHttpModule(conf.PprofConf, status).SetRouter(router)
+	_, err := ps.AddModule(ps.httpModule)
+	return err
 }
 
 func (ps *PprofService) routerHandler(r *gin.RouterGroup) {
@@ -71,10 +66,7 @@ func (ps *PprofService) routerHandler(r *gin.RouterGroup) {
 }
 
 func (ps *PprofService) OnStart() error {
-	if err := ps.httpModule.OnStart(); err != nil {
-		return err
-	}
-	return nil
+	return ps.httpModule.StartBackground()
 }
 
 func (ps *PprofService) OnRelease() {

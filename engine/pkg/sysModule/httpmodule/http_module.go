@@ -4,7 +4,6 @@
 package httpmodule
 
 import (
-	"sync"
 	"sync/atomic"
 
 	"github.com/gin-gonic/gin"
@@ -21,8 +20,6 @@ type HttpModule struct {
 	systemMod string
 	conf      *httpx.Conf
 	server    *httpx.GinServer
-
-	wg *sync.WaitGroup
 }
 
 func (hs *HttpModule) OnInit() error {
@@ -40,6 +37,18 @@ func (hs *HttpModule) OnStart() error {
 	hs.server.Start()
 
 	return nil
+}
+
+// StartBackground 在端口绑定成功后返回，供不能阻塞启动的宿主使用。
+func (hs *HttpModule) StartBackground() error {
+	if !atomic.CompareAndSwapUint32(&hs.running, 0, 1) {
+		return def.ErrServiceIsRunning
+	}
+	err := hs.server.StartBackground()
+	if err != nil {
+		atomic.StoreUint32(&hs.running, 0)
+	}
+	return err
 }
 
 func (hs *HttpModule) OnRelease() {
@@ -86,7 +95,6 @@ func NewHttpModule(conf *httpx.Conf, systemMod string) *HttpModule {
 	return &HttpModule{
 		conf:      conf,
 		server:    httpx.NewGinServer(),
-		wg:        new(sync.WaitGroup),
 		systemMod: systemMod,
 	}
 }
