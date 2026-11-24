@@ -1,0 +1,27 @@
+// Package pid
+// 模块名: 节点进程id
+// 功能描述: 进程id
+package pid
+
+import (
+	"fmt"
+	"os"
+	"path"
+	"strconv"
+	"syscall"
+)
+
+// RecordPID 记录pid
+func RecordPID(cachePath, nodeID, nodeType string) {
+	_ = os.WriteFile(path.Join(cachePath, fmt.Sprintf("%s_%s", nodeType, nodeID)+".pid"), ([]byte)(strconv.Itoa(GetPid())), 0644)
+}
+
+// DeletePID 删除pid
+func DeletePID(cachePath, nodeID, nodeType string) {
+	_ = os.Remove(path.Join(cachePath, fmt.Sprintf("%s_%s", nodeType, nodeID)+".pid"))
+}
+
+// GetPid 获取pid
+func GetPid() int {
+	return syscall.Getpid()
+}

@@ -1,0 +1,6 @@
+# github.com/velkrel/unitengine/engine/pkg/sysService/pprofservice/config
+Conf:
+  Addr: 0.0.0.0:99
+  ReadHeaderTimeout: 10s
+  IdleTimeout: 30s
+

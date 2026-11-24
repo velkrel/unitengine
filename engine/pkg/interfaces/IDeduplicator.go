@@ -1,0 +1,12 @@
+// Package interfaces
+// 模块名: 模块名
+// 功能描述: 描述
+package interfaces
+
+type IDeDuplicator interface {
+	Seen(serviceUid string, id uint64) bool
+	SeenKey(key string) bool
+	// Close 释放内部资源（如 go-cache 的 janitor goroutine）。
+	// Node.Stop() 时调用，确保零残留。
+	Close()
+}

@@ -1,0 +1,240 @@
+// Package repository
+// @Title  服务选择器
+// @Description  根据条件选择服务
+package repository
+
+import (
+	"github.com/velkrel/unitengine/engine/pkg/actor"
+	"github.com/velkrel/unitengine/engine/pkg/def"
+	inf "github.com/velkrel/unitengine/engine/pkg/interfaces"
+	"github.com/velkrel/unitengine/engine/pkg/rpc/message/msgbus"
+)
+
+func (r *Repository) newMessageBus(sender inf.IRpcDispatcher, receiver inf.IRpcDispatcher, err error) *msgbus.MessageBus {
+	if r.busFactory != nil {
+		return r.busFactory.New(sender, receiver, err)
+	}
+	return msgbus.NewMessageBus(sender, receiver, err)
+}
+
+func (r *Repository) NewBus(sender inf.IRpcDispatcher, receiver inf.IRpcDispatcher, err error) inf.IBus {
+	return r.newMessageBus(sender, receiver, err)
+}
+
+func (r *Repository) SelectByServiceUid(serviceUid string) inf.IRpcDispatcher {
+	v, ok := r.mapPID.Load(serviceUid)
+	if ok {
+		info := v.(*serviceInfo)
+		sender := info.getDispatcher()
+		if sender != nil && !actor.IsRetired(sender.GetPid()) {
+			return sender
+		}
+	} else {
+		tmpV, ok := r.tmpMapPid.Load(serviceUid)
+		if ok {
+			tmp := tmpV.(*tmpInfo)
+			tmp.touch()
+			sender := tmp.getDispatcher()
+			if sender != nil {
+				return sender
+			}
+		}
+	}
+	return nil
+}
+
+//
+//func (r *Repository) FindOne(sender *actor.PID, serviceUid string) inf.IBus {
+//	s := r.SelectByServiceUid(sender.GetServiceUid())
+//	c := r.SelectByServiceUid(serviceUid)
+//	if c != nil && !actor.IsRetired(c.GetPid()) {
+//		b := msgbus.NewMessageBus(s, c, nil)
+//		return b
+//	}
+//	return msgbus.NewMessageBus(s, c, def.ErrServiceNotFound)
+//}
+//
+//func (r *Repository) Select(sender *actor.PID, builders ...inf.CriteriaBuilder) inf.IBus {
+//	s := r.SelectByServiceUid(sender.GetServiceUid())
+//
+//	criteria := &inf.FilterCriteria{}
+//	for _, build := range builders {
+//		build(criteria)
+//	}
+//
+//	var returnList msgbus.MultiBus
+//	r.mapPID.Range(func(_, value any) bool {
+//		c := value.(inf.IRpcDispatcher)
+//		pid := c.GetPid()
+//
+//		for _, pred := range criteria.Predicates {
+//			if !pred(pid) {
+//				return true
+//			}
+//		}
+//
+//		returnList = append(returnList, msgbus.NewMessageBus(s, c, nil))
+//		return true
+//	})
+//
+//	return returnList
+//}
+//
+//func (r *Repository) SelectSlavers(sender *actor.PID, serverId int32, serviceName, serviceId string, options ...inf.SelectorOption) inf.IBus {
+//	return nil
+//}
+
+// ===============================下面的废弃,使用上面的新接口=============================
+
+func (r *Repository) SelectByPid(sender, receiver *actor.PID) inf.IBus {
+	s := r.SelectByServiceUid(sender.GetServiceUid())
+	c := r.SelectByServiceUid(receiver.GetServiceUid())
+	if c != nil && !actor.IsRetired(c.GetPid()) {
+		b := r.newMessageBus(s, c, nil)
+		return b
+	}
+	return r.newMessageBus(s, c, def.ErrServiceNotFound)
+}
+
+func (r *Repository) SelectBySvcUid(sender *actor.PID, serviceUid string) inf.IBus {
+	s := r.SelectByServiceUid(sender.GetServiceUid())
+	c := r.SelectByServiceUid(serviceUid)
+
+	if c != nil && !actor.IsRetired(c.GetPid()) {
+		b := r.newMessageBus(s, c, nil)
+		return b
+	}
+	return r.newMessageBus(s, c, def.ErrServiceNotFound)
+}
+
+func (r *Repository) SelectByRule(sender *actor.PID, rule func(pid *actor.PID) bool) inf.IBus {
+	s := r.SelectByServiceUid(sender.GetServiceUid())
+	var returnList msgbus.MultiBus
+	r.mapPID.Range(func(key, value any) bool {
+		info := value.(*serviceInfo)
+		c := info.getDispatcher()
+		if c == nil {
+			return true
+		}
+		pid := c.GetPid()
+		if r.isSelectableInfo(info) && pid.IsMasterNode() && rule(pid) {
+			returnList = append(returnList, r.newMessageBus(s, c, nil))
+		}
+		return true
+	})
+
+	return returnList
+}
+
+func (r *Repository) Select(sender *actor.PID, options ...inf.SelectParamBuilder) inf.IBus {
+	s := r.SelectByServiceUid(sender.GetServiceUid())
+	r.mapNodeLock.RLock(indexLockKey)
+	defer r.mapNodeLock.RUnlock(indexLockKey)
+
+	param := &inf.SelectParam{}
+	for _, build := range options {
+		build(param)
+	}
+
+	nameUidMap, ok := r.mapSvcBySNameAndSUid[*param.ServiceName] // 不做判断,如果没给serviceName直接崩,免得忘写
+	if !ok {
+		return r.newMessageBus(s, nil, def.ErrServiceNotFound)
+	}
+
+	var returnList msgbus.MultiBus
+	for serviceUid, _ := range nameUidMap {
+		c := r.SelectByServiceUid(serviceUid)
+		if c == nil || !r.IsSelectable(serviceUid) {
+			continue
+		}
+		cPid := c.GetPid()
+		if !actor.IsRetired(cPid) && (param.Partition == nil || cPid.GetPartition() == *param.Partition) &&
+			(param.ServiceId == nil || cPid.GetServiceId() == *param.ServiceId) && cPid.IsMasterNode() == !param.IsSlaver {
+			returnList = append(returnList, r.newMessageBus(s, c, nil))
+		}
+	}
+
+	return returnList
+}
+
+func (r *Repository) SelectByServiceType(sender *actor.PID, partition int32, serviceType, serviceName string) inf.IBus {
+	if serviceType == "" && serviceName == "" {
+		return msgbus.MultiBus{}
+	}
+	r.mapNodeLock.RLock(indexLockKey)
+	defer r.mapNodeLock.RUnlock(indexLockKey)
+
+	var list msgbus.MultiBus
+	var serviceList []string
+	if serviceType == "" {
+		for _, nameUidMap := range r.mapSvcBySTpAndSName {
+			uidMap, ok := nameUidMap[serviceName] // serviceType 和 serviceName不能同时为空,所以这里必定有serviceName
+			if !ok {
+				continue
+			}
+			for serviceUid := range uidMap {
+				serviceList = append(serviceList, serviceUid)
+			}
+		}
+	} else {
+		nameUidMap, ok := r.mapSvcBySTpAndSName[serviceType]
+		if !ok {
+			return list
+		}
+
+		if serviceName == "" {
+			for _, uidMap := range nameUidMap {
+				for serviceUid := range uidMap {
+					serviceList = append(serviceList, serviceUid)
+				}
+			}
+		} else {
+			uidMap, ok := nameUidMap[serviceName]
+			if !ok {
+				return list
+			}
+			for serviceUid := range uidMap {
+				serviceList = append(serviceList, serviceUid)
+			}
+		}
+	}
+
+	s := r.SelectByServiceUid(sender.GetServiceUid())
+
+	for _, serviceUid := range serviceList {
+		c := r.SelectByServiceUid(serviceUid)
+		if c == nil || !r.IsSelectable(serviceUid) {
+			continue
+		}
+		cPid := c.GetPid()
+		if c != nil && !actor.IsRetired(cPid) && (partition == 0 || cPid.GetPartition() == partition) && cPid.IsMasterNode() {
+			list = append(list, r.newMessageBus(s, c, nil))
+		}
+	}
+
+	return list
+}
+
+func (r *Repository) SelectByFilterAndChoice(sender *actor.PID, filter func(pid *actor.PID) bool, choice func(pids []*actor.PID) []*actor.PID) inf.IBus {
+	s := r.SelectByServiceUid(sender.GetServiceUid())
+	var tmpList []*actor.PID
+	r.mapPID.Range(func(key, value any) bool {
+		info := value.(*serviceInfo)
+		dispatcher := info.getDispatcher()
+		if dispatcher != nil && r.isSelectableInfo(info) && filter(dispatcher.GetPid()) {
+			tmpList = append(tmpList, dispatcher.GetPid())
+		}
+		return true
+	})
+
+	list := choice(tmpList)
+	var returnList msgbus.MultiBus
+	for _, pid := range list {
+		c := r.SelectByServiceUid(pid.GetServiceUid())
+		if c != nil && !actor.IsRetired(c.GetPid()) {
+			returnList = append(returnList, r.newMessageBus(s, c, nil))
+		}
+	}
+
+	return returnList
+}

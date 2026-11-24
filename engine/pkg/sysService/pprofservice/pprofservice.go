@@ -1,0 +1,82 @@
+// Package pprofservice
+// @Title  性能性分析服务
+// @Description  性能性分析服务
+package pprofservice
+
+import (
+	"net/http"
+	_ "net/http/pprof"
+
+	"github.com/gin-gonic/gin"
+	"github.com/velkrel/unitengine/engine/pkg/utils/httpx/router_center"
+
+	systemConfig "github.com/velkrel/unitengine/engine/pkg/config"
+	"github.com/velkrel/unitengine/engine/pkg/core"
+	inf "github.com/velkrel/unitengine/engine/pkg/interfaces"
+	"github.com/velkrel/unitengine/engine/pkg/services"
+	"github.com/velkrel/unitengine/engine/pkg/sysModule/httpmodule"
+	"github.com/velkrel/unitengine/engine/pkg/sysService/pprofservice/config"
+)
+
+func RegisterPprofService() {
+	services.SetService("PprofService", func() inf.IService { return &PprofService{} })
+	systemConfig.RegisterServiceConf(&systemConfig.ServiceConfig{
+		ServiceName:   "PprofService",
+		ConfName:      "pprof",
+		ConfType:      "yaml",
+		ConfPath:      "",
+		CfgCreator:    func() interface{} { return &config.PprofConf{} },
+		DefaultSetFun: config.SetPprofConfDefault,
+		OnChangeFun: func() {
+			// TODO 配置变更回调
+		},
+	})
+}
+
+type PprofService struct {
+	core.Service
+
+	httpModule *httpmodule.HttpModule
+}
+
+func (ps *PprofService) getConf() *config.PprofConf {
+	return ps.GetServiceCfg().(*config.PprofConf)
+}
+
+func (ps *PprofService) OnInit() error {
+	status := systemConfig.Release
+	if ctx := ps.GetNodeContext(); ctx != nil {
+		if cfg := ctx.GetConfig(); cfg != nil {
+			status = cfg.GetStatus()
+		}
+	}
+	ps.httpModule = httpmodule.NewHttpModule(ps.getConf().PprofConf, status)
+	ps.httpModule.SetRouter(ps.initRouter())
+	_, err := ps.AddModule(ps.httpModule)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (ps *PprofService) initRouter() *router_center.GroupHandlerPool {
+	router := router_center.NewGroupHandlerPool()
+	router.RegisterGroupHandler("", ps.routerHandler)
+	return router
+}
+
+func (ps *PprofService) routerHandler(r *gin.RouterGroup) {
+	r.GET("/debug/pprof", gin.WrapH(http.DefaultServeMux))
+	r.GET("/debug/pprof/*pprof", gin.WrapH(http.DefaultServeMux))
+}
+
+func (ps *PprofService) OnStart() error {
+	if err := ps.httpModule.OnStart(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (ps *PprofService) OnRelease() {
+	ps.ReleaseAllChildModule()
+}

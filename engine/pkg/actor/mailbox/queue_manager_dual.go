@@ -1,0 +1,96 @@
+// Package mailbox
+// @Title  双队列管理器
+// @Description  实现系统队列（高优先级）+ 用户队列（普通优先级）的双队列模式,性能更优
+package mailbox
+
+import (
+	"github.com/velkrel/unitengine/engine/pkg/def"
+	inf "github.com/velkrel/unitengine/engine/pkg/interfaces"
+)
+
+// DualQueueManager 双队列管理器
+// 职责：将消息分为系统消息（高优先级）和用户消息（普通优先级）两个队列
+// 调度策略：始终优先处理系统消息
+type DualQueueManager struct {
+	systemMailbox queue[inf.IMailboxJob] // 系统队列：PrioritySys/Urgent/High
+	userMailbox   queue[inf.IMailboxJob] // 用户队列：PriorityNormal/Low/Batch
+}
+
+// NewDualQueueManager 创建双队列管理器
+func NewDualQueueManager() *DualQueueManager {
+	spec, err := normalizeQueueSpec(nil)
+	if err != nil {
+		panic(err)
+	}
+	return newDualQueueManager(spec)
+}
+
+func newDualQueueManager(spec normalizedQueueSpec) *DualQueueManager {
+	return &DualQueueManager{
+		systemMailbox: newQueue[inf.IMailboxJob](normalizedPhysicalQueueSpec{backend: spec.backend, capacity: spec.dual.system}),
+		userMailbox:   newQueue[inf.IMailboxJob](normalizedPhysicalQueueSpec{backend: spec.backend, capacity: spec.dual.user}),
+	}
+}
+
+// Submit 提交事件到对应队列
+func (m *DualQueueManager) Submit(e inf.IMailboxJob) error {
+	// 按优先级分配队列：< Normal 的进系统队列，>= Normal 的进用户队列
+	q := m.userMailbox
+	if e.GetPriority() < def.PriorityNormal {
+		q = m.systemMailbox
+	}
+	if !q.Push(e) {
+		return def.ErrMailboxWorkerIsFull
+	}
+	return nil
+}
+
+// NextJob 获取下一个待处理事件
+// 调度策略：优先返回系统队列的消息，系统队列为空时返回用户队列消息
+func (m *DualQueueManager) NextJob() (inf.IMailboxJob, bool) {
+	// 优先处理系统消息
+	if e, ok := m.systemMailbox.Pop(); ok {
+		return e, true
+	}
+
+	// 再处理用户消息
+	if e, ok := m.userMailbox.Pop(); ok {
+		return e, true
+	}
+
+	return nil, false
+}
+
+// GetJobLen 获取所有队列的总消息数量
+func (m *DualQueueManager) GetJobLen() int {
+	total := 0
+	if m.systemMailbox != nil {
+		total += m.systemMailbox.Len()
+	}
+	if m.userMailbox != nil {
+		total += m.userMailbox.Len()
+	}
+	return total
+}
+
+// DrainAll 清空所有队列
+func (m *DualQueueManager) DrainAll(handler func(inf.IMailboxJob)) {
+	// 先清空系统队列
+	for !m.systemMailbox.Empty() {
+		if e, ok := m.systemMailbox.Pop(); ok {
+			handler(e)
+		}
+	}
+
+	// 再清空用户队列
+	for !m.userMailbox.Empty() {
+		if e, ok := m.userMailbox.Pop(); ok {
+			handler(e)
+		}
+	}
+}
+
+// IsEmpty 判断所有队列是否为空
+func (m *DualQueueManager) IsEmpty() bool {
+	return m.systemMailbox.Empty() && m.userMailbox.Empty()
+}
